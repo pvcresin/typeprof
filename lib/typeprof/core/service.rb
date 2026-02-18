@@ -414,30 +414,113 @@ module TypeProf::Core
       end
     end
 
-    def format_declared_const_path(cpath, stack)
-      scope_cpath =
-        stack.reverse_each.find do |entry|
-          (entry.is_a?(AST::ClassNode) || entry.is_a?(AST::ModuleNode)) &&
-            entry.static_cpath &&
-            !entry.static_cpath.empty?
-        end&.static_cpath
+    class DeclarationRenderPolicy
+      def initialize(genv, root)
+        @genv = genv
+        @root = root
+        @relative_nested_declarations = detect_relative_nested_declarations
+      end
 
-      return cpath.join("::") unless scope_cpath
-      return cpath.join("::") unless cpath[0, scope_cpath.size] == scope_cpath
+      def declaration_const_path(cpath, stack)
+        return cpath.join("::") unless @relative_nested_declarations && stack.any?
 
-      rel_cpath = cpath.drop(scope_cpath.size)
-      rel_cpath.empty? ? cpath.join("::") : rel_cpath.join("::")
+        relative_const_path(cpath, stack)
+      end
+
+      def assignment_const_path(cpath, stack)
+        relative_const_path(cpath, stack)
+      end
+
+      def superclass_path(node, superclass)
+        return superclass.show_cpath unless requires_absolute_superclass_path?(node, superclass)
+
+        "::#{ superclass.show_cpath }"
+      end
+
+      def top_level_separator?(out, stack)
+        @relative_nested_declarations &&
+          stack.empty? &&
+          !out.empty? &&
+          !out[-1].empty?
+      end
+
+      private
+
+      def detect_relative_nested_declarations
+        return false unless @root
+
+        @root.traverse do |event, node|
+          next unless event == :enter
+          next unless node.is_a?(AST::ClassNode)
+          next unless node.static_cpath
+
+          mod = @genv.resolve_cpath(node.static_cpath)
+          superclass = mod.superclass
+          next unless superclass && superclass.cpath != []
+
+          return true if requires_absolute_superclass_path?(node, superclass)
+        end
+
+        false
+      end
+
+      def relative_const_path(cpath, stack)
+        scope_cpath =
+          stack.reverse_each.find do |entry|
+            (entry.is_a?(AST::ClassNode) || entry.is_a?(AST::ModuleNode)) &&
+              entry.static_cpath &&
+              !entry.static_cpath.empty?
+          end&.static_cpath
+
+        return cpath.join("::") unless scope_cpath
+        return cpath.join("::") unless cpath[0, scope_cpath.size] == scope_cpath
+
+        rel_cpath = cpath.drop(scope_cpath.size)
+        rel_cpath.empty? ? cpath.join("::") : rel_cpath.join("::")
+      end
+
+      def extract_constant_read_expression(node)
+        return unless node.is_a?(AST::ConstantReadNode)
+
+        cpath = []
+        absolute = false
+        while node.is_a?(AST::ConstantReadNode)
+          cpath << node.cname
+          absolute ||= node.toplevel
+          node = node.cbase
+        end
+
+        return unless node.nil?
+
+        { cpath: cpath.reverse, absolute: absolute }
+      end
+
+      def requires_absolute_superclass_path?(node, superclass)
+        expr = extract_constant_read_expression(node.superclass_cpath)
+        return false unless expr
+
+        return true if expr[:absolute]
+
+        node.static_cpath &&
+          node.static_cpath.size > 1 &&
+          expr[:cpath] == [node.static_cpath.last] &&
+          superclass.cpath == expr[:cpath]
+      end
     end
 
     def dump_declarations(path)
       stack = []
       out = []
+      root = @rb_text_nodes[path]
+      policy = DeclarationRenderPolicy.new(@genv, root)
       @rb_text_nodes[path]&.traverse do |event, node|
         case node
         when AST::ModuleNode
           if node.static_cpath
             if event == :enter
-              out << "  " * stack.size + "module #{ node.static_cpath.join("::") }"
+              out << "" if policy.top_level_separator?(out, stack)
+              cpath = policy.declaration_const_path(node.static_cpath, stack)
+              out << "  " * stack.size + "module #{ cpath }"
               if stack == [:toplevel]
                 out << "end"
                 stack.pop
@@ -453,13 +536,15 @@ module TypeProf::Core
             next if stack.any? { node.is_a?(AST::SingletonClassNode) && (_1.is_a?(AST::ClassNode) || _1.is_a?(AST::ModuleNode)) && node.static_cpath == _1.static_cpath }
 
             if event == :enter
-              s = "class #{ node.static_cpath.join("::") }"
+              out << "" if policy.top_level_separator?(out, stack)
+              cpath = policy.declaration_const_path(node.static_cpath, stack)
+              s = "class #{ cpath }"
               mod = @genv.resolve_cpath(node.static_cpath)
               superclass = mod.superclass
               if superclass == nil
                 s << " # failed to identify its superclass"
               elsif superclass.cpath != []
-                s << " < #{ superclass.show_cpath }"
+                s << " < #{ policy.superclass_path(node, superclass) }"
               end
               if stack == [:toplevel]
                 out << "end"
@@ -480,7 +565,8 @@ module TypeProf::Core
         when AST::ConstantWriteNode
           if node.static_cpath
             if event == :enter
-              out << "  " * stack.size + "#{ format_declared_const_path(node.static_cpath, stack) }: #{ node.ret.show }"
+              cpath = policy.assignment_const_path(node.static_cpath, stack)
+              out << "  " * stack.size + "#{ cpath }: #{ node.ret.show }"
             end
           end
         else
