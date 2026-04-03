@@ -25,6 +25,40 @@ def foo(...)
   bar(...)
 end
 
+def bar
+  1
+end
+
+foo()
+
+## assert
+class Object
+  def foo: (*untyped, **untyped) -> Integer
+  def bar: -> Integer
+end
+
+## update
+def foo(...)
+  bar(1, ...)
+end
+
+def bar(a, *b, **c)
+  [a, b, c]
+end
+
+foo(x: 4, y: 5)
+
+## assert
+class Object
+  def foo: (*untyped, **Integer) -> [Integer, Array[untyped], { x: Integer, y: Integer }]
+  def bar: (Integer, *untyped, **Integer) -> [Integer, Array[untyped], { x: Integer, y: Integer }]
+end
+
+## update
+def foo(...)
+  bar(...)
+end
+
 def bar(*a, **b)
   [a, b]
 end
